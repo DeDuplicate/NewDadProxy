@@ -4,8 +4,15 @@ from urllib.parse import urlparse, urljoin, quote, unquote
 import re
 import traceback
 import os
+import warnings
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+warnings.filterwarnings('ignore', category=InsecureRequestWarning)
 
 app = Flask(__name__)
+
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 def detect_m3u_type(content):
     """Rileva se è un M3U (lista IPTV) o un M3U8 (flusso HLS)"""
@@ -27,47 +34,89 @@ def resolve_m3u8_link(url, headers=None):
     Tenta di risolvere un URL M3U8.
     Prova prima la logica specifica per iframe (tipo Daddylive), inclusa la lookup della server_key.
     Se fallisce, verifica se l'URL iniziale era un M3U8 diretto e lo restituisce.
+    Supporta anche URL diretti di VidEmbed.
     """
     if not url:
-        print("Errore: URL non fornito.")
+        logger.error("Errore: URL non fornito.")
         return {"resolved_url": None, "headers": {}}
 
-    print(f"Tentativo di risoluzione URL: {url}")
+    logger.info(f"Tentativo di risoluzione URL: {url}")
     # Utilizza gli header forniti, altrimenti usa un User-Agent di default
     current_headers = headers if headers else {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0+Safari/537.36'}
 
     initial_response_text = None
     final_url_after_redirects = None
 
-    # Verifica se è un URL di vavoo.to
-    is_vavoo = "thedaddy.click" in url.lower()
+    # Verifica se è un URL di daddylive/thedaddy
+    is_daddylive = any(domain in url.lower() for domain in ["thedaddy.dad", "thedaddy.click", "daddylive.sx"])
+    
+    # Verifica se è un URL diretto di VidEmbed/CDN
+    is_vidembed_cdn = any(domain in url.lower() for domain in [
+        "chinese-restaurant-api.site",
+        "vidembed.re",
+        "vidembed.to",
+        "vidembed.cc",
+        "vidembed.me",
+        ".m3u8"
+    ])
 
     try:
         with requests.Session() as session:
-            print(f"Passo 1: Richiesta a {url}")
+            logger.info(f"Passo 1: Richiesta a {url}")
+            
+            # Se è daddylive.sx, gestisci il redirect
+            if "daddylive.sx" in url.lower():
+                # daddylive.sx reindirizza a thedaddy.dad, quindi sostituisci direttamente
+                url = url.replace("daddylive.sx", "thedaddy.dad")
+                logger.info(f"Convertito daddylive.sx in thedaddy.dad: {url}")
+            
             response = session.get(url, headers=current_headers, allow_redirects=True, timeout=(5, 15))
             response.raise_for_status()
             initial_response_text = response.text
             final_url_after_redirects = response.url
-            print(f"Passo 1 completato. URL finale dopo redirect: {final_url_after_redirects}")
+            logger.info(f"Passo 1 completato. URL finale dopo redirect: {final_url_after_redirects}")
 
-            # Se è un URL di vavoo.to, salta la logica dell'iframe
-            if is_vavoo:
+            # Se è un URL diretto di VidEmbed CDN, restituiscilo direttamente
+            if is_vidembed_cdn:
+                logger.info(f"Rilevato URL diretto VidEmbed/CDN: {url}")
+                # Se è già un M3U8, usa header specifici per VidEmbed
+                if ".m3u8" in url.lower():
+                    vidembed_headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
+                        'Referer': 'https://www.vidembed.re/',
+                        'Origin': 'https://www.vidembed.re',
+                        'Accept': '*/*',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Cache-Control': 'no-cache',
+                        'Pragma': 'no-cache',
+                        'Sec-Fetch-Dest': 'empty',
+                        'Sec-Fetch-Mode': 'cors',
+                        'Sec-Fetch-Site': 'cross-site'
+                    }
+                    return {
+                        "resolved_url": url,
+                        "headers": vidembed_headers
+                    }
+                # Se è un dominio VidEmbed ma non M3U8, verifica il contenuto
+                elif initial_response_text and initial_response_text.strip().startswith('#EXTM3U'):
+                    return {
+                        "resolved_url": final_url_after_redirects,
+                        "headers": current_headers
+                    }
+
+            # Se è un URL di daddylive, verifica se è già un M3U8
+            if is_daddylive:
                 if initial_response_text and initial_response_text.strip().startswith('#EXTM3U'):
                     return {
                         "resolved_url": final_url_after_redirects,
                         "headers": current_headers
                     }
-                else:
-                    # Se non è un M3U8 diretto, restituisci l'URL originale per vavoo
-                    print(f"URL vavoo.to non è un M3U8 diretto: {url}")
-                    return {
-                        "resolved_url": url,
-                        "headers": current_headers
-                    }
+                # Altrimenti continua con la logica dell'iframe per daddylive
+                logger.info(f"URL daddylive non è un M3U8 diretto, tentativo con logica iframe: {url}")
 
             # Prova la logica dell'iframe per gli altri URL
-            print("Tentativo con logica iframe...")
+            logger.info("Tentativo con logica iframe...")
             try:
                 # Secondo passo (Iframe): Trova l'iframe src nella risposta iniziale
                 iframes = re.findall(r'iframe src="([^"]+)"', initial_response_text)
@@ -75,18 +124,18 @@ def resolve_m3u8_link(url, headers=None):
                     raise ValueError("Nessun iframe src trovato.")
 
                 url2 = iframes[0]
-                print(f"Passo 2 (Iframe): Trovato iframe URL: {url2}")
+                logger.info(f"Passo 2 (Iframe): Trovato iframe URL: {url2}")
 
                 # Terzo passo (Iframe): Richiesta all'URL dell'iframe
                 referer_raw = urlparse(url2).scheme + "://" + urlparse(url2).netloc + "/"
                 origin_raw = urlparse(url2).scheme + "://" + urlparse(url2).netloc
                 current_headers['Referer'] = referer_raw
                 current_headers['Origin'] = origin_raw
-                print(f"Passo 3 (Iframe): Richiesta a {url2}")
-                response = session.get(url2, headers=current_headers, timeout=(5, 15))
+                logger.info(f"Passo 3 (Iframe): Richiesta a {url2}")
+                response = session.get(url2, headers=current_headers, timeout=(5, 15), verify=False)
                 response.raise_for_status()
                 iframe_response_text = response.text
-                print("Passo 3 (Iframe) completato.")
+                logger.info("Passo 3 (Iframe) completato.")
 
                 # Quarto passo (Iframe): Estrai parametri dinamici dall'iframe response
                 channel_key_match = re.search(r'(?s) channelKey = \"([^\"]*)"', iframe_response_text)
@@ -106,35 +155,35 @@ def resolve_m3u8_link(url, headers=None):
                 auth_host = auth_host_match.group(1)
                 server_lookup = server_lookup_match.group(1)
 
-                print("Passo 4 (Iframe): Parametri dinamici estratti.")
+                logger.info("Passo 4 (Iframe): Parametri dinamici estratti.")
 
                 # Quinto passo (Iframe): Richiesta di autenticazione
                 auth_url = f'{auth_host}{channel_key}&ts={auth_ts}&rnd={auth_rnd}&sig={auth_sig}'
-                print(f"Passo 5 (Iframe): Richiesta di autenticazione a {auth_url}")
-                auth_response = session.get(auth_url, headers=current_headers, timeout=(5, 15))
+                logger.info(f"Passo 5 (Iframe): Richiesta di autenticazione a {auth_url}")
+                auth_response = session.get(auth_url, headers=current_headers, timeout=(5, 15), verify=False)
                 auth_response.raise_for_status()
-                print("Passo 5 (Iframe) completato.")
+                logger.info("Passo 5 (Iframe) completato.")
 
                 # Sesto passo (Iframe): Richiesta di server lookup per ottenere la server_key
                 server_lookup_url = f"https://{urlparse(url2).netloc}{server_lookup}{channel_key}"
-                print(f"Passo 6 (Iframe): Richiesta server lookup a {server_lookup_url}")
-                server_lookup_response = session.get(server_lookup_url, headers=current_headers, timeout=(5, 15))
+                logger.info(f"Passo 6 (Iframe): Richiesta server lookup a {server_lookup_url}")
+                server_lookup_response = session.get(server_lookup_url, headers=current_headers, timeout=(5, 15), verify=False)
                 server_lookup_response.raise_for_status()
                 server_lookup_data = server_lookup_response.json()
-                print("Passo 6 (Iframe) completato.")
+                logger.info("Passo 6 (Iframe) completato.")
 
                 # Settimo passo (Iframe): Estrai server_key dalla risposta di server lookup
                 server_key = server_lookup_data.get('server_key')
                 if not server_key:
                     raise ValueError("'server_key' non trovato nella risposta di server lookup.")
-                print(f"Passo 7 (Iframe): Estratto server_key: {server_key}")
+                logger.info(f"Passo 7 (Iframe): Estratto server_key: {server_key}")
 
                 # Ottavo passo (Iframe): Costruisci il link finale
                 host_match = re.search('(?s)m3u8 =.*?:.*?:.*?".*?".*?"([^"]*)"', iframe_response_text)
                 if not host_match:
                     raise ValueError("Impossibile trovare l'host finale per l'm3u8.")
                 host = host_match.group(1)
-                print(f"Passo 8 (Iframe): Trovato host finale per m3u8: {host}")
+                logger.info(f"Passo 8 (Iframe): Trovato host finale per m3u8: {host}")
 
                 # Costruisci l'URL finale del flusso
                 final_stream_url = (
@@ -154,28 +203,28 @@ def resolve_m3u8_link(url, headers=None):
                 }
 
             except (ValueError, requests.exceptions.RequestException) as e:
-                print(f"Logica iframe fallita: {e}")
-                print("Tentativo fallback: verifica se l'URL iniziale era un M3U8 diretto...")
+                logger.info(f"Logica iframe fallita: {e}")
+                logger.info("Tentativo fallback: verifica se l'URL iniziale era un M3U8 diretto...")
 
                 # Fallback: Verifica se la risposta iniziale era un file M3U8 diretto
                 if initial_response_text and initial_response_text.strip().startswith('#EXTM3U'):
-                    print("Fallback riuscito: Trovato file M3U8 diretto.")
+                    logger.info("Fallback riuscito: Trovato file M3U8 diretto.")
                     return {
                         "resolved_url": final_url_after_redirects,
                         "headers": current_headers
                     }
                 else:
-                    print("Fallback fallito: La risposta iniziale non era un M3U8 diretto.")
+                    logger.info("Fallback fallito: La risposta iniziale non era un M3U8 diretto.")
                     return {
                         "resolved_url": url,
                         "headers": current_headers
                     }
 
     except requests.exceptions.RequestException as e:
-        print(f"Errore durante la richiesta HTTP iniziale: {e}")
+        logger.info(f"Errore durante la richiesta HTTP iniziale: {e}")
         return {"resolved_url": url, "headers": current_headers}
     except Exception as e:
-        print(f"Errore generico durante la risoluzione: {e}")
+        logger.info(f"Errore generico durante la risoluzione: {e}")
         return {"resolved_url": url, "headers": current_headers}
 
 @app.route('/proxy')
@@ -243,22 +292,40 @@ def proxy_m3u():
     # --- Logica per trasformare l'URL se necessario ---
     processed_url = m3u_url
     
+    # Se è già un URL diretto M3U8 di VidEmbed/CDN, usalo direttamente
+    is_direct_m3u8 = any(domain in m3u_url.lower() for domain in [
+        "chinese-restaurant-api.site",
+        "vidembed.re",
+        "vidembed.to",
+        "vidembed.cc",
+        "vidembed.me"
+    ]) and ".m3u8" in m3u_url.lower()
+    
+    if is_direct_m3u8:
+        logger.info(f"Rilevato URL M3U8 diretto VidEmbed: {m3u_url}")
+        # Non necessita trasformazione, verrà gestito da resolve_m3u8_link
     # Trasforma /stream/ in /embed/ per Daddylive
-    if '/stream/stream-' in m3u_url and 'thedaddy.click' in m3u_url:
+    elif '/stream/stream-' in m3u_url and any(domain in m3u_url for domain in ['thedaddy.dad', 'thedaddy.click', 'daddylive.sx']):
         processed_url = m3u_url.replace('/stream/stream-', '/embed/stream-')
-        print(f"URL {m3u_url} trasformato da /stream/ a /embed/: {processed_url}")
+        logger.info(f"URL {m3u_url} trasformato da /stream/ a /embed/: {processed_url}")
     match_premium_m3u8 = re.search(r'/premium(\d+)/mono\.m3u8$', m3u_url)
 
     if match_premium_m3u8:
         channel_number = match_premium_m3u8.group(1)
-        transformed_url = f"https://thedaddy.click/embed/stream-{channel_number}.php"
-        print(f"URL {m3u_url} corrisponde al pattern premium. Trasformato in: {transformed_url}")
+        # Usa il dominio dall'URL originale se presente, altrimenti usa thedaddy.dad
+        if 'thedaddy.click' in m3u_url:
+            transformed_url = f"https://thedaddy.click/embed/stream-{channel_number}.php"
+        elif 'daddylive.sx' in m3u_url:
+            transformed_url = f"https://daddylive.sx/embed/stream-{channel_number}.php"
+        else:
+            transformed_url = f"https://thedaddy.dad/embed/stream-{channel_number}.php"
+        logger.info(f"URL {m3u_url} corrisponde al pattern premium. Trasformato in: {transformed_url}")
         processed_url = transformed_url
     else:
-        print(f"URL {processed_url} processato per la risoluzione.")
+        logger.info(f"URL {processed_url} processato per la risoluzione.")
 
     try:
-        print(f"Chiamata a resolve_m3u8_link per URL processato: {processed_url}")
+        logger.info(f"Chiamata a resolve_m3u8_link per URL processato: {processed_url}")
         result = resolve_m3u8_link(processed_url, headers)
 
         if not result["resolved_url"]:
@@ -267,10 +334,10 @@ def proxy_m3u():
         resolved_url = result["resolved_url"]
         current_headers_for_proxy = result["headers"]
 
-        print(f"Risoluzione completata. URL M3U8 finale: {resolved_url}")
+        logger.info(f"Risoluzione completata. URL M3U8 finale: {resolved_url}")
 
         # Fetchare il contenuto M3U8 effettivo dall'URL risolto
-        print(f"Fetching M3U8 content from resolved URL: {resolved_url}")
+        logger.info(f"Fetching M3U8 content from resolved URL: {resolved_url}")
         m3u_response = requests.get(resolved_url, headers=current_headers_for_proxy, allow_redirects=True, timeout=(10, 20)) # Timeout connessione 10s, lettura 20s
         m3u_response.raise_for_status()
         m3u_content = m3u_response.text
@@ -303,10 +370,10 @@ def proxy_m3u():
         return Response(modified_m3u8_content, content_type="application/vnd.apple.mpegurl")
 
     except requests.RequestException as e:
-        print(f"Errore durante il download o la risoluzione del file: {str(e)}")
+        logger.info(f"Errore durante il download o la risoluzione del file: {str(e)}")
         return f"Errore durante il download o la risoluzione del file M3U/M3U8: {str(e)}", 500
     except Exception as e:
-        print(f"Errore generico nella funzione proxy_m3u: {str(e)}")
+        logger.info(f"Errore generico nella funzione proxy_m3u: {str(e)}")
         return f"Errore generico durante l'elaborazione: {str(e)}", 500
 
 @app.route('/proxy/resolve')
@@ -392,8 +459,8 @@ def proxy_key():
 
 @app.route('/playlist/channels.m3u8')
 def playlist_channels():
-    """Gibt eine modifizierte Playlist mit Proxy-Links zurück"""
-    playlist_url = "https://raw.githubusercontent.com/MarkMCFC/NewDadProxy/refs/heads/main/channel.m3u8"
+    """Fetches playlist from GitHub and proxies ALL URLs with headers"""
+    playlist_url = "https://raw.githubusercontent.com/DeDuplicate/NewDadProxy/refs/heads/main/channel.m3u8"
     
     try:
         host_url = request.host_url.rstrip('/')
@@ -402,21 +469,46 @@ def playlist_channels():
         playlist_content = response.text
         
         modified_lines = []
+        current_headers = {}
+        
         for line in playlist_content.splitlines():
             stripped_line = line.strip()
+            
+            # Extract headers from EXTVLCOPT lines
+            if stripped_line.startswith('#EXTVLCOPT:http-referrer='):
+                current_headers['Referer'] = stripped_line.replace('#EXTVLCOPT:http-referrer=', '')
+            elif stripped_line.startswith('#EXTVLCOPT:http-origin='):
+                current_headers['Origin'] = stripped_line.replace('#EXTVLCOPT:http-origin=', '')
+            elif stripped_line.startswith('#EXTVLCOPT:http-user-agent='):
+                current_headers['User-Agent'] = stripped_line.replace('#EXTVLCOPT:http-user-agent=', '')
+            
+            # Process URL lines
             if stripped_line and not stripped_line.startswith('#'):
-                proxy_line = f"{host_url}/proxy/m3u?url={quote(stripped_line)}"
-                modified_lines.append(proxy_line)
+                # Build proxy URL with headers
+                proxy_url = f"{host_url}/proxy/m3u?url={quote(stripped_line)}"
+                
+                # Add headers as query parameters
+                if current_headers:
+                    for key, value in current_headers.items():
+                        proxy_url += f"&h_{quote(key)}={quote(value)}"
+                
+                modified_lines.append(proxy_url)
+                # Reset headers for next channel
+                current_headers = {}
             else:
-                modified_lines.append(line)
+                # Keep metadata lines but skip EXTVLCOPT lines since we inject headers in proxy URL
+                if not stripped_line.startswith('#EXTVLCOPT:'):
+                    modified_lines.append(line)
         
         modified_content = '\n'.join(modified_lines)
         return Response(modified_content, content_type="application/vnd.apple.mpegurl")
 
     except requests.RequestException as e:
-        return f"Fehler beim Laden der Playlist: {str(e)}", 500
+        logger.error(f"Error loading playlist: {str(e)}")
+        return f"Error loading playlist: {str(e)}", 500
     except Exception as e:
-        return f"Allgemeiner Fehler: {str(e)}", 500
+        logger.error(f"General error: {str(e)}")
+        return f"General error: {str(e)}", 500
 
 
 @app.route('/playlist/events.m3u8')
@@ -439,19 +531,19 @@ def playlist_events():
         return Response(m3u_content, content_type="application/vnd.apple.mpegurl")
     
     except Exception as e:
-        print(f"Fehler in /playlist/events: {str(e)}")
+        logger.info(f"Fehler in /playlist/events: {str(e)}")
         return f"Interner Serverfehler: {str(e)}", 500
 
 def fetch_schedule_data():
     """Holt die aktuellen Sendeplandaten von der Website"""
-    url = "https://thedaddy.click/schedule/schedule-generated.php"
+    url = "https://daddylive.sx/schedule/schedule-generated.php"
     headers = {
-        "authority": "thedaddy.click",
+        "authority": "daddylive.sx",
         "accept": "*/*",
         "accept-encoding": "gzip, deflate, br, zstd",
         "accept-language": "de-DE,de;q=0.9",
         "priority": "u=1, i",
-        "referer": "https://thedaddy.click/",
+        "referer": "https://daddylive.sx/",
         "sec-ch-ua": '"Brave";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
@@ -467,10 +559,10 @@ def fetch_schedule_data():
         if response.status_code == 200:
             return response.json()
         else:
-            print(f"Fehler beim Abrufen der Daten: Status-Code {response.status_code}")
+            logger.info(f"Fehler beim Abrufen der Daten: Status-Code {response.status_code}")
             return None
     except Exception as e:
-        print(f"Fehler beim Abrufen der Daten: {e}")
+        logger.info(f"Fehler beim Abrufen der Daten: {e}")
         return None
 
 def json_to_m3u(data, host_url):
@@ -484,7 +576,7 @@ def json_to_m3u(data, host_url):
         main_key = list(data.keys())[0]
         categories = data[main_key]
     except Exception as e:
-        print(f"Fehler beim Verarbeiten der JSON-Daten: {e}")
+        logger.info(f"Fehler beim Verarbeiten der JSON-Daten: {e}")
         return None
 
     for category_name, events in categories.items():
@@ -516,11 +608,11 @@ def json_to_m3u(data, host_url):
                 try:
                     channel_id_int = int(channel_id)
                     if channel_id_int > 999:
-                        stream_url = f"https://thedaddy.click/stream/bet.php?id=bet{channel_id}"
+                        stream_url = f"https://daddylive.sx/stream/bet.php?id=bet{channel_id}"
                     else:
-                        stream_url = f"https://thedaddy.click/stream/stream-{channel_id}.php"
+                        stream_url = f"https://daddylive.sx/stream/stream-{channel_id}.php"
                 except (ValueError, TypeError):
-                    stream_url = f"https://thedaddy.click/stream/stream-{channel_id}.php"
+                    stream_url = f"https://daddylive.sx/stream/stream-{channel_id}.php"
                 
                 # Generiere den Proxy-Link im gewünschten Format
                 proxy_url = f"{host_url}/proxy/m3u?url={stream_url}"
@@ -541,5 +633,5 @@ def index():
     return "Proxy started!"
 
 if __name__ == '__main__':
-    print("Proxy started!")
+    logger.info("Proxy started!")
     app.run(host="0.0.0.0", port=7860, debug=False)
