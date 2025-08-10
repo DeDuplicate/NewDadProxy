@@ -862,17 +862,56 @@ def proxy_key():
     except requests.RequestException as e:
         return f"Errore durante il download della chiave AES-128: {str(e)}", 500
 
-@app.route('/playlist/channels.m3u8')
+@app.route('/playlist/channels.m3u8', methods=['GET', 'OPTIONS'])
 def playlist_channels():
-    """Reverted simple playlist; optional header injection via ?headers=1"""
-    logger.info(f"Playlist request from {request.remote_addr} - User-Agent: {request.headers.get('User-Agent', 'Unknown')}")
-    playlist_url = "https://raw.githubusercontent.com/DeDuplicate/NewDadProxy/refs/heads/main/channel.m3u8"
-    use_header_mode = request.args.get('headers') in ('1', 'true', 'yes')
+    """Fixed playlist endpoint with enhanced VLC compatibility"""
+    # Handle CORS preflight requests
+    if request.method == 'OPTIONS':
+        response_headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, OPTIONS',
+            'Access-Control-Allow-Headers': 'Range, User-Agent, Content-Type',
+            'Access-Control-Max-Age': '86400'
+        }
+        return Response('', headers=response_headers)
+    
+    user_agent = request.headers.get('User-Agent', 'Unknown')
+    logger.info(f"Playlist request from {request.remote_addr} - User-Agent: {user_agent}")
+    
+    # Try local file first, then fallback to GitHub
+    playlist_content = None
+    local_file_path = "channel.m3u8"
+    
     try:
+        # First try to load from local file
+        try:
+            with open(local_file_path, 'r', encoding='utf-8') as f:
+                playlist_content = f.read()
+            logger.info("Loaded playlist from local file")
+        except FileNotFoundError:
+            # Fallback to GitHub
+            playlist_url = "https://raw.githubusercontent.com/DeDuplicate/NewDadProxy/refs/heads/main/channel.m3u8"
+            github_headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
+                'Accept': 'text/plain, application/vnd.apple.mpegurl, */*',
+                'Cache-Control': 'no-cache'
+            }
+            
+            response = requests.get(playlist_url, headers=github_headers, timeout=15)
+            response.raise_for_status()
+            playlist_content = response.text
+            logger.info("Loaded playlist from GitHub")
+        
+        # Ensure content is properly decoded and normalized
+        if isinstance(playlist_content, bytes):
+            playlist_content = playlist_content.decode('utf-8')
+        
+        # Normalize line endings and clean up any malformed lines
+        playlist_content = playlist_content.replace('\r\n', '\n').replace('\r', '\n')
+        
         host_url = request.host_url.rstrip('/')
-        response = requests.get(playlist_url, timeout=10)
-        response.raise_for_status()
-        playlist_content = response.text
+        use_header_mode = request.args.get('headers') in ('1', 'true', 'yes')
+        
         modified_lines = []
         if not use_header_mode:
             for line in playlist_content.splitlines():
@@ -900,14 +939,210 @@ def playlist_channels():
                 else:
                     if not stripped.startswith('#EXTVLCOPT:'):
                         modified_lines.append(line)
+        
         modified_content = '\n'.join(modified_lines)
-        return Response(modified_content, content_type="application/vnd.apple.mpegurl")
+        
+        # Ensure the content ends with a newline for better compatibility
+        if not modified_content.endswith('\n'):
+            modified_content += '\n'
+        
+        # Enhanced headers for better VLC compatibility
+        response_headers = {
+            'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
+            'Content-Disposition': 'inline; filename="channels.m3u8"',
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, OPTIONS',
+            'Access-Control-Allow-Headers': 'Range, User-Agent, Content-Type',
+            'Accept-Ranges': 'bytes',
+            'Connection': 'keep-alive',
+            'Server': 'nginx/1.18.0'  # Some players prefer specific server identification
+        }
+        
+        # Add Content-Length header
+        content_bytes = modified_content.encode('utf-8')
+        response_headers['Content-Length'] = str(len(content_bytes))
+        
+        # Handle Range requests for VLC compatibility
+        range_header = request.headers.get('Range')
+        if range_header and range_header.startswith('bytes='):
+            try:
+                range_spec = range_header[6:]  # Remove "bytes="
+                if '-' in range_spec:
+                    start_str, end_str = range_spec.split('-', 1)
+                    start = int(start_str) if start_str else 0
+                    end = int(end_str) if end_str else len(content_bytes) - 1
+                    
+                    if start >= len(content_bytes):
+                        return Response('Range Not Satisfiable', status=416)
+                    
+                    end = min(end, len(content_bytes) - 1)
+                    partial_content = content_bytes[start:end+1]
+                    
+                    response_headers.update({
+                        'Content-Length': str(len(partial_content)),
+                        'Content-Range': f'bytes {start}-{end}/{len(content_bytes)}'
+                    })
+                    
+                    logger.info(f"Serving partial content: bytes {start}-{end}/{len(content_bytes)}")
+                    return Response(partial_content, status=206, headers=response_headers)
+            except (ValueError, IndexError):
+                logger.info("Invalid range header, serving full content")
+        
+        # For VLC, ensure we return proper status and headers
+        return Response(content_bytes, status=200, headers=response_headers)
+        
     except requests.RequestException as e:
         logger.error(f"Error loading playlist: {str(e)}")
-        return f"Error loading playlist: {str(e)}", 500
+        error_response = f"#EXTM3U\n#EXTINF:-1,Error loading playlist\n# Error: {str(e)}\n"
+        return Response(error_response, status=500, headers={'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8'})
     except Exception as e:
         logger.error(f"General error: {str(e)}")
-        return f"General error: {str(e)}", 500
+        error_response = f"#EXTM3U\n#EXTINF:-1,General error\n# Error: {str(e)}\n"
+        return Response(error_response, status=500, headers={'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8'})
+
+
+@app.route('/playlist/channels_vlc.m3u8')
+def playlist_channels_vlc():
+    """VLC-specific playlist endpoint with ultra-simple format for debugging"""
+    user_agent = request.headers.get('User-Agent', 'Unknown')
+    logger.info(f"VLC-specific playlist request from {request.remote_addr} - User-Agent: {user_agent}")
+    
+    # Create a simple test playlist for VLC debugging
+    host_url = request.host_url.rstrip('/')
+    
+    # Ultra simple format - no EXTVLCOPT headers, just basic M3U
+    simple_m3u_content = f"""#EXTM3U
+#EXTINF:-1,Test Channel 1
+{host_url}/proxy/m3u?url=https%3A//daddylive.sx/stream/stream-857.php
+#EXTINF:-1,Test Channel 2  
+{host_url}/proxy/m3u?url=https%3A//daddylive.sx/stream/stream-726.php
+"""
+    
+    response_headers = {
+        'Content-Type': 'application/vnd.apple.mpegurl',
+        'Content-Length': str(len(simple_m3u_content.encode('utf-8'))),
+        'Cache-Control': 'no-cache',
+        'Accept-Ranges': 'bytes'
+    }
+    
+    return Response(simple_m3u_content.encode('utf-8'), headers=response_headers)
+
+
+@app.route('/vlc_test.m3u8')
+def vlc_test():
+    """Ultra-simple VLC test with direct M3U8 URLs"""
+    user_agent = request.headers.get('User-Agent', 'Unknown')
+    logger.info(f"VLC test request from {request.remote_addr} - User-Agent: {user_agent}")
+    
+    # Test with known working M3U8 URLs
+    test_content = """#EXTM3U
+#EXTINF:-1,BBC One
+https://vs-hls-push-ww-live.akamaized.net/x=4/i=urn:bbc:pips:service:bbc_one_hd/t=3840/v=pv14/b=5070016/main.m3u8
+#EXTINF:-1,Test Stream
+https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8
+"""
+    
+    return Response(test_content, content_type='application/vnd.apple.mpegurl')
+
+
+@app.route('/vlc_proxy_test.m3u8')
+def vlc_proxy_test():
+    """Test VLC with our proxy but simpler format"""
+    user_agent = request.headers.get('User-Agent', 'Unknown')
+    logger.info(f"VLC proxy test request from {request.remote_addr} - User-Agent: {user_agent}")
+    
+    host_url = request.host_url.rstrip('/')
+    
+    # Test with just one working stream URL through our proxy
+    test_content = f"""#EXTM3U
+#EXTINF:-1,Test Proxy Stream
+{host_url}/proxy/m3u?url=https%3A//test-streams.mux.dev/x36xhzz/x36xhzz.m3u8
+"""
+    
+    return Response(test_content, content_type='application/vnd.apple.mpegurl')
+
+
+@app.route('/minimal_test.m3u8')
+def minimal_test():
+    """Absolute minimal test - just like a static file server would serve"""
+    user_agent = request.headers.get('User-Agent', 'Unknown')
+    logger.info(f"Minimal test request from {request.remote_addr} - User-Agent: {user_agent}")
+    
+    # Log range header if present
+    range_header = request.headers.get('Range')
+    if range_header:
+        logger.info(f"Range request: {range_header}")
+    
+    # Exactly what a static web server would return
+    content = "#EXTM3U\n#EXTINF:-1,BBC One\nhttps://vs-hls-push-ww-live.akamaized.net/x=4/i=urn:bbc:pips:service:bbc_one_hd/t=3840/v=pv14/b=5070016/main.m3u8\n"
+    content_bytes = content.encode('utf-8')
+    
+    # Handle range requests properly for VLC compatibility
+    if range_header and range_header.startswith('bytes='):
+        try:
+            # Parse range header (e.g., "bytes=0-" or "bytes=0-1023")
+            range_spec = range_header[6:]  # Remove "bytes="
+            if '-' in range_spec:
+                start_str, end_str = range_spec.split('-', 1)
+                start = int(start_str) if start_str else 0
+                end = int(end_str) if end_str else len(content_bytes) - 1
+                
+                # Ensure valid range
+                if start >= len(content_bytes):
+                    return Response('Range Not Satisfiable', status=416)
+                
+                end = min(end, len(content_bytes) - 1)
+                partial_content = content_bytes[start:end+1]
+                
+                headers = {
+                    'Content-Type': 'application/vnd.apple.mpegurl',
+                    'Content-Length': str(len(partial_content)),
+                    'Content-Range': f'bytes {start}-{end}/{len(content_bytes)}',
+                    'Accept-Ranges': 'bytes'
+                }
+                
+                logger.info(f"Serving partial content: bytes {start}-{end}/{len(content_bytes)}")
+                return Response(partial_content, status=206, headers=headers)
+        except (ValueError, IndexError):
+            # Invalid range header, fall back to full content
+            logger.info("Invalid range header, serving full content")
+    
+    # Serve full content (normal response)
+    headers = {
+        'Content-Type': 'application/vnd.apple.mpegurl',
+        'Content-Length': str(len(content_bytes)),
+        'Accept-Ranges': 'bytes'
+    }
+    
+    return Response(content_bytes, status=200, headers=headers)
+
+
+@app.route('/debug_headers.m3u8')
+def debug_headers():
+    """Debug endpoint to see what headers VLC is sending"""
+    user_agent = request.headers.get('User-Agent', 'Unknown')
+    logger.info(f"Debug headers request from {request.remote_addr} - User-Agent: {user_agent}")
+    
+    # Log all headers VLC is sending
+    logger.info("=== VLC REQUEST HEADERS ===")
+    for header_name, header_value in request.headers:
+        logger.info(f"{header_name}: {header_value}")
+    logger.info("=== END HEADERS ===")
+    
+    # Simple working content
+    content = "#EXTM3U\n#EXTINF:-1,Debug Test\nhttps://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8\n"
+    
+    return Response(
+        content,
+        status=200,
+        headers={
+            'Content-Type': 'application/vnd.apple.mpegurl',
+            'Server': 'nginx/1.18.0'
+        }
+    )
 
 
 @app.route('/playlist/events.m3u8')

@@ -1,10 +1,5 @@
 #EXTM3U url-tvg="https://raw.githubusercontent.com/MarkMCFC/tfms.xyz/refs/heads/main/epgs/daddylive-channels-epg.xml"
 
-#EXTINF:-1 tvg-id="M+.Vamos.es" tvg-logo="https://raw.githubusercontent.com/MarkMCFC/tfms.xyz/refs/heads/main/logos/vamos.png" group-title="SPAIN",#Vamos Spain
-#EXTVLCOPT:http-referrer=https://vecloud.eu/
-#EXTVLCOPT:http-user-agent=Mozilla/5.0 (Linux; Android 8.0; Pixel 2 Build/OPD3.170816.012) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.7837.1625 Mobile Safari/537.36
-https://hipaf6u2j3pwygg.nice-flower.store/v4/variant/VE1gTdz0mLzRnLv52bt9SMhFjdtM3ajFmc09COiFTMlVGOlR2YzUTLzgzN50SOmFGNtIWYwYWL4U2YhRmY3gzL.m3u8
-
 #EXTINF:-1 tvg-id="20(Italian).it" tvg-logo="https://raw.githubusercontent.com/MarkMCFC/tfms.xyz/refs/heads/main/logos/20mediaset.png" group-title="ITALY",20 Mediaset Italy
 #EXTVLCOPT:http-referrer=https://vecloud.eu/
 #EXTVLCOPT:http-user-agent=Mozilla/5.0 (Linux; Android 8.0; Pixel 2 Build/OPD3.170816.012) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.7837.1625 Mobile Safari/537.36
