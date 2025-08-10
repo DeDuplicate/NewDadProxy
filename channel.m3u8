@@ -1,9 +1,4 @@
 #EXTM3U
-#EXTINF:-1 tvg-id="20(Italian).it" tvg-logo="https://raw.githubusercontent.com/MarkMCFC/tfms.xyz/refs/heads/main/logos/20mediaset.png" group-title="ITALY",20 Mediaset Italy
-#EXTVLCOPT:http-referrer=https://vecloud.eu/
-#EXTVLCOPT:http-user-agent=Mozilla/5.0 (Linux; Android 8.0; Pixel 2 Build/OPD3.170816.012) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.7837.1625 Mobile Safari/537.36
-https://daddylive.sx/stream/stream-857.php
-
 #EXTINF:-1 tvg-id="3sat.de" tvg-logo="https://raw.githubusercontent.com/MarkMCFC/tfms.xyz/refs/heads/main/logos/3sat.png" group-title="GERMANY",3sat DE
 #EXTVLCOPT:http-referrer=https://vecloud.eu/
 #EXTVLCOPT:http-user-agent=Mozilla/5.0 (Linux; Android 8.0; Pixel 2 Build/OPD3.170816.012) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.7837.1625 Mobile Safari/537.36
