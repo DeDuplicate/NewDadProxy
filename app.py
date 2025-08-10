@@ -4,6 +4,7 @@ from urllib.parse import urlparse, urljoin, quote, unquote
 import re
 import traceback
 import os
+import json
 import warnings
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 warnings.filterwarnings('ignore', category=InsecureRequestWarning)
@@ -29,6 +30,38 @@ def replace_key_uri(line, headers_query):
         return line.replace(key_url, proxied_key_url)
     return line
 
+def get_all_player_cdns():
+    """
+    Returns comprehensive list of all known player CDN domains and patterns
+    for easier proxy resolution and discovery
+    """
+    return {
+        'newkso_cdns': [
+            'top1.newkso.ru', 'top2.newkso.ru', 'top3.newkso.ru', 'top4.newkso.ru',
+            'top1new.newkso.ru', 'top3new.newkso.ru', 'top4new.newkso.ru',
+            'cdn1.newkso.ru', 'cdn2.newkso.ru', 'cdn1new.newkso.ru', 'cdn2new.newkso.ru',
+            'windnew.newkso.ru', 'nfsnew.newkso.ru', 'zekonew.newkso.ru',
+            'ddy1new.newkso.ru', 'ddy2new.newkso.ru', 'ddy3new.newkso.ru', 
+            'ddy4new.newkso.ru', 'ddy5new.newkso.ru', 'ddy6new.newkso.ru', 
+            'ddy7new.newkso.ru', 'ddy8new.newkso.ru'
+        ],
+        'vidembed_cdns': [
+            'vidembed.re', 'vidembed.to', 'vidembed.cc', 'vidembed.me',
+            'chinese-restaurant-api.site', 'happy-ending.site'
+        ],
+        'daddylive_domains': [
+            'thedaddy.dad', 'thedaddy.click', 'daddylive.sx', 'daddylive.mp', 'dlhd.click'
+        ],
+        'stream_patterns': [
+            '/embed/stream-', '/stream/stream-', '/cast/stream-', '/watch/stream-',
+            '/d3.php', '/premiumtv/', '/auth.php', '/lookup'
+        ],
+        'm3u8_patterns': [
+            '/mono.m3u8', '/premium{channel_id}/mono.m3u8', 
+            '/{server_key}/{channel_id}/mono.m3u8'
+        ]
+    }
+
 def resolve_m3u8_link(url, headers=None, debug=False):
     """
     Tenta di risolvere un URL M3U8.
@@ -45,10 +78,11 @@ def resolve_m3u8_link(url, headers=None, debug=False):
 
     initial_response_text = None
     final_url_after_redirects = None
-    is_daddylive = any(domain in url.lower() for domain in ["thedaddy.dad", "thedaddy.click", "daddylive.sx"])
-    is_vidembed_cdn = any(domain in url.lower() for domain in [
-        "chinese-restaurant-api.site","vidembed.re","vidembed.to","vidembed.cc","vidembed.me","newkso.ru",".m3u8"
-    ])
+    
+    # Enhanced CDN detection using comprehensive list
+    cdn_config = get_all_player_cdns()
+    is_daddylive = any(domain in url.lower() for domain in cdn_config['daddylive_domains'])
+    is_vidembed_cdn = any(domain in url.lower() for domain in cdn_config['vidembed_cdns'] + cdn_config['newkso_cdns']) or '.m3u8' in url.lower()
 
     try:
         with requests.Session() as session:
@@ -83,10 +117,58 @@ def resolve_m3u8_link(url, headers=None, debug=False):
 
             logger.info("Attempting iframe logic...")
             try:
-                iframes = re.findall(r'<iframe[^>]+src=[\'\"]([^\'\"]+)[\'\"]', initial_response_text or '', re.IGNORECASE)
-                if not iframes:
-                    raise ValueError("No iframe src found.")
-                url2 = iframes[0]
+                # Enhanced iframe detection with multiple patterns
+                iframe_patterns = [
+                    r'<iframe[^>]+src=["\']([^"\']+)["\']',  # Standard iframe
+                    r'<iframe[^>]*src\s*=\s*["\']([^"\']+)["\']',  # With extra spaces
+                    r'iframe.*?src.*?["\']([^"\']*jxoplay[^"\']*)["\']',  # Look for jxoplay specifically
+                    r'iframe.*?src.*?["\']([^"\']*premiumtv[^"\']*)["\']',  # Look for premiumtv
+                    r'<embed[^>]+src=["\']([^"\']+)["\']',  # Alternative embed tags
+                    r'source.*?src.*?["\']([^"\']+)["\']',  # Source elements
+                ]
+                
+                iframes = []
+                content_to_search = initial_response_text or ''
+                
+                for pattern in iframe_patterns:
+                    matches = re.findall(pattern, content_to_search, re.IGNORECASE | re.DOTALL)
+                    if matches:
+                        iframes.extend(matches)
+                        logger.info(f"Found {len(matches)} iframe(s) with pattern: {pattern[:50]}...")
+                
+                # Additional search in script tags for dynamic iframe creation
+                script_iframe_patterns = [
+                    r'src\s*=\s*["\']([^"\']*jxoplay[^"\']*)["\']',
+                    r'["\']([^"\']*premiumtv/daddyhd\.php[^"\']*)["\']',
+                    r'iframe.*?["\']([^"\']*\.php\?id=\d+[^"\']*)["\']',
+                ]
+                
+                for pattern in script_iframe_patterns:
+                    matches = re.findall(pattern, content_to_search, re.IGNORECASE)
+                    if matches:
+                        iframes.extend(matches)
+                        logger.info(f"Found {len(matches)} script iframe(s) with pattern: {pattern[:50]}...")
+                
+                # Remove duplicates and filter valid URLs
+                unique_iframes = []
+                for iframe in iframes:
+                    if iframe and iframe.startswith(('http', '/')) and iframe not in unique_iframes:
+                        unique_iframes.append(iframe)
+                
+                if not unique_iframes:
+                    # Last resort: try to construct iframe URL based on channel ID
+                    channel_match = re.search(r'stream-(\d+)\.php', url)
+                    if channel_match:
+                        channel_id = channel_match.group(1)
+                        constructed_iframe = f"https://jxoplay.xyz/premiumtv/daddyhd.php?id={channel_id}"
+                        logger.info(f"No iframe found, constructing from channel ID: {constructed_iframe}")
+                        unique_iframes = [constructed_iframe]
+                
+                if not unique_iframes:
+                    raise ValueError("No iframe src found after enhanced detection.")
+                    
+                url2 = unique_iframes[0]
+                logger.info(f"Selected iframe URL: {url2}")
                 logger.info(f"Step 2 (Iframe): Found iframe URL: {url2}")
                 referer_raw = urlparse(url2).scheme + "://" + urlparse(url2).netloc + "/"
                 origin_raw = urlparse(url2).scheme + "://" + urlparse(url2).netloc
@@ -507,28 +589,41 @@ def resolve_m3u8_link(url, headers=None, debug=False):
                     if 'channelKey=' not in auth_host and '{channelKey}' not in auth_host:
                         auth_host = f"{auth_host}{sep}channelKey="
 
-                # Enhanced authentication URL construction using base64 extracted parameters
-                auth_url = None
+                # Enhanced authentication URL construction with multiple server fallback
+                auth_servers = [
+                    'https://top2new.newkso.ru/auth.php',
+                    'https://top1new.newkso.ru/auth.php', 
+                    'https://top3new.newkso.ru/auth.php',
+                    'https://windnew.newkso.ru/auth.php',
+                    'https://nfsnew.newkso.ru/auth.php'
+                ]
                 
-                # First try using base_url and auth_endpoint if available
-                if params.get('base_url') and params.get('auth_endpoint') and channel_key and auth_ts and auth_rnd and auth_sig:
-                    base_url = params['base_url'].rstrip('/')
-                    auth_endpoint = params['auth_endpoint']
-                    auth_url = f'{base_url}/{auth_endpoint}?channel_id={channel_key}&ts={auth_ts}&rnd={auth_rnd}&sig={auth_sig}'
-                    logger.info(f"Using enhanced auth URL construction: {auth_url}")
-                # Fallback to legacy auth_host method
-                elif auth_host and channel_key and auth_ts and auth_rnd and auth_sig:
-                    auth_url = f'{auth_host}{channel_key}&ts={auth_ts}&rnd={auth_rnd}&sig={auth_sig}'
-                    logger.info(f"Using legacy auth URL construction: {auth_url}")
+                auth_successful = False
+                for auth_server in auth_servers:
+                    try:
+                        auth_url = f'{auth_server}?channel_id={channel_key}&ts={auth_ts}&rnd={auth_rnd}&sig={auth_sig}'
+                        logger.info(f"Step 5 (Iframe): Trying authentication server: {auth_url}")
+                        
+                        # Use enhanced headers for auth request
+                        auth_headers = current_headers.copy()
+                        auth_headers.update({
+                            'Accept': 'application/json, text/plain, */*',
+                            'X-Requested-With': 'XMLHttpRequest'
+                        })
+                        
+                        auth_response = session.get(auth_url, headers=auth_headers, timeout=(5, 15), verify=False)
+                        auth_response.raise_for_status()
+                        
+                        logger.info(f"Step 5 (Iframe) complete with server: {auth_server}")
+                        auth_successful = True
+                        break
+                        
+                    except requests.exceptions.RequestException as e:
+                        logger.info(f"Auth server {auth_server} failed: {e}")
+                        continue
                 
-                if not auth_url:
-                    logger.info("Cannot construct auth URL - missing required parameters")
-                    return None
-                
-                logger.info(f"Step 5 (Iframe): Authentication request to {auth_url}")
-                auth_response = session.get(auth_url, headers=current_headers, timeout=(5, 15), verify=False)
-                auth_response.raise_for_status()
-                logger.info("Step 5 (Iframe) complete.")
+                if not auth_successful:
+                    raise ValueError("All authentication servers failed")
 
                 if server_lookup.startswith('/'):
                     server_lookup_url = f"https://{urlparse(url2).netloc}{server_lookup}{channel_key}"
@@ -570,9 +665,133 @@ def resolve_m3u8_link(url, headers=None, debug=False):
                     return {"resolved_url": final_url_after_redirects, "headers": current_headers}
                 else:
                     logger.info("Fallback failed: Initial response was not a direct M3U8.")
-                    # For daddylive sites, return None instead of the HTML page
+                    # For daddylive sites, try alternative resolution methods
                     if is_daddylive:
-                        logger.info("Daddylive parameter extraction failed - returning None")
+                        logger.info("Trying alternative resolution methods for DaddyLive...")
+                        
+                        # Method 0: Try direct URL construction without authentication (fastest)
+                        channel_match = re.search(r'stream-(\d+)\.php', url)
+                        if channel_match:
+                            channel_id = channel_match.group(1)
+                            logger.info(f"Extracted channel ID: {channel_id}")
+                            
+                            # Try known working patterns first - expanded list for better chances
+                            priority_cdns = [
+                                f"https://zekonew.newkso.ru/zeko/premium{channel_id}/mono.m3u8",
+                                f"https://nfsnew.newkso.ru/nfs/premium{channel_id}/mono.m3u8", 
+                                f"https://windnew.newkso.ru/wind/premium{channel_id}/mono.m3u8",
+                                f"https://ddy1new.newkso.ru/ddy1/premium{channel_id}/mono.m3u8",
+                                f"https://ddy2new.newkso.ru/ddy2/premium{channel_id}/mono.m3u8",
+                                f"https://ddy3new.newkso.ru/ddy3/premium{channel_id}/mono.m3u8",
+                                f"https://ddy4new.newkso.ru/ddy4/premium{channel_id}/mono.m3u8",
+                                f"https://ddy5new.newkso.ru/ddy5/premium{channel_id}/mono.m3u8",
+                                f"https://top1.newkso.ru/top1/cdn/premium{channel_id}/mono.m3u8",
+                                f"https://top2.newkso.ru/top2/premium{channel_id}/mono.m3u8"
+                            ]
+                            
+                            logger.info("Trying priority CDN patterns (no auth required)...")
+                            
+                            # Multiple header strategies for bypassing IP blocks
+                            header_strategies = [
+                                {
+                                    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
+                                    'Referer': 'https://jxoplay.xyz/premiumtv/',
+                                    'Origin': 'https://jxoplay.xyz'
+                                },
+                                {
+                                    'User-Agent': 'Mozilla/5.0 (Android 13; Mobile; rv:109.0) Gecko/109.0 Firefox/118.0',
+                                    'Referer': 'https://forcedtoplay.xyz/',
+                                    'Origin': 'https://forcedtoplay.xyz'
+                                },
+                                {
+                                    'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18',
+                                    'Referer': 'https://jxoplay.xyz/'
+                                }
+                            ]
+                            
+                            # Try each CDN with each header strategy
+                            for priority_url in priority_cdns:
+                                for strategy in header_strategies:
+                                    try:
+                                        test_response = session.head(priority_url, headers=strategy, timeout=2, verify=False)
+                                        if test_response.status_code in [200, 206]:
+                                            logger.info(f"Priority CDN successful (no auth): {priority_url}")
+                                            return {"resolved_url": priority_url, "headers": strategy}
+                                    except Exception:
+                                        continue
+                        
+                        # Method 1: Try different auth servers
+                        alternative_servers = [
+                            "https://top1new.newkso.ru",
+                            "https://top3new.newkso.ru", 
+                            "https://top4new.newkso.ru",
+                            "https://cdn1new.newkso.ru",
+                            "https://cdn2new.newkso.ru"
+                        ]
+                        
+                        # Extract channel ID from original URL
+                        channel_match = re.search(r'stream-(\d+)\.php', url)
+                        if channel_match:
+                            channel_id = channel_match.group(1)
+                            logger.info(f"Extracted channel ID: {channel_id}")
+                            
+                            # Method 2: Generate direct M3U8 construction patterns using CDN config
+                            cdn_config = get_all_player_cdns()
+                            direct_patterns = []
+                            
+                            # Generate patterns from newkso CDNs
+                            for cdn in cdn_config['newkso_cdns']:
+                                if 'top1.newkso.ru' in cdn:
+                                    direct_patterns.append(f"https://{cdn}/top1/cdn/premium{channel_id}/mono.m3u8")
+                                else:
+                                    # Extract server key from CDN domain
+                                    server_key = cdn.split('.')[0]
+                                    if server_key.endswith('new'):
+                                        server_key = server_key[:-3]  # Remove 'new' suffix
+                                    direct_patterns.append(f"https://{cdn}/{server_key}/premium{channel_id}/mono.m3u8")
+                            
+                            # Add some additional common patterns
+                            extra_patterns = [
+                                f"https://top2new.newkso.ru/top2/premium{channel_id}/mono.m3u8",
+                                f"https://streamnew.newkso.ru/stream/premium{channel_id}/mono.m3u8",
+                                f"https://livednew.newkso.ru/lived/premium{channel_id}/mono.m3u8"
+                            ]
+                            direct_patterns.extend(extra_patterns)
+                            
+                            logger.info("Trying direct M3U8 URL patterns with enhanced strategy...")
+                            
+                            # Try patterns with different request strategies
+                            for pattern_url in direct_patterns[:15]:  # Limit to first 15 for faster response
+                                for strategy in ['head', 'get_partial']:
+                                    try:
+                                        test_headers = {
+                                            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
+                                            'Referer': 'https://jxoplay.xyz/premiumtv/',
+                                            'Origin': 'https://jxoplay.xyz',
+                                            'Accept': '*/*',
+                                            'Cache-Control': 'no-cache'
+                                        }
+                                        
+                                        if strategy == 'head':
+                                            test_response = session.head(pattern_url, headers=test_headers, timeout=3, verify=False)
+                                        else:  # get_partial - get with range to test quickly
+                                            test_headers['Range'] = 'bytes=0-1023'
+                                            test_response = session.get(pattern_url, headers=test_headers, timeout=3, verify=False)
+                                        
+                                        if test_response.status_code in [200, 206, 302]:
+                                            logger.info(f"Direct pattern successful ({strategy}): {pattern_url}")
+                                            return {"resolved_url": pattern_url, "headers": test_headers}
+                                            
+                                    except Exception as test_e:
+                                        if 'timeout' not in str(test_e).lower():
+                                            logger.info(f"Direct pattern failed {pattern_url} ({strategy}): {test_e}")
+                                        continue
+                                    
+                                    # If head worked, don't try get_partial for same URL
+                                    if strategy == 'head' and test_response.status_code in [200, 206]:
+                                        break
+                        
+                        logger.info("All alternative methods failed - returning None")
                         return {"resolved_url": None, "headers": current_headers}
                     return {"resolved_url": url, "headers": current_headers}
     except requests.exceptions.RequestException as e:
@@ -630,11 +849,21 @@ def proxy_m3u():
     if not m3u_url:
         return "Errore: Parametro 'url' mancante", 400
     debug_mode = request.args.get('debug','').lower() in ('1','true','yes')
-    # Updated default headers (new referer/origin + UA provided by user)
+    # Enhanced headers to bypass IP blocking
     default_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
-        "Referer": "https://jxoplay.xyz/",
-        "Origin": "https://jxoplay.xyz"
+        "Referer": "https://jxoplay.xyz/premiumtv/",
+        "Origin": "https://jxoplay.xyz",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "cross-site",
+        "Cache-Control": "max-age=0"
     }
 
     # Estrai gli header dalla richiesta, sovrascrivendo i default
@@ -649,22 +878,30 @@ def proxy_m3u():
     processed_url = m3u_url
     
     # Se è già un URL diretto M3U8 di VidEmbed/CDN, usalo direttamente
-    is_direct_m3u8 = any(domain in m3u_url.lower() for domain in [
-        "chinese-restaurant-api.site",
-        "vidembed.re",
-        "vidembed.to",
-        "vidembed.cc",
-        "vidembed.me",
-        "newkso.ru"
-    ]) and ".m3u8" in m3u_url.lower()
+    cdn_config = get_all_player_cdns()
+    all_cdn_domains = cdn_config['vidembed_cdns'] + cdn_config['newkso_cdns']
+    is_direct_m3u8 = any(domain in m3u_url.lower() for domain in all_cdn_domains) and ".m3u8" in m3u_url.lower()
     
-    if is_direct_m3u8:
+    # Special handling for happy-ending.site URLs with JWT auth
+    is_happy_ending_jwt = "happy-ending.site" in m3u_url.lower() and ("?auth=" in m3u_url or "&auth=" in m3u_url)
+    
+    if is_direct_m3u8 or is_happy_ending_jwt:
         logger.info(f"Rilevato URL M3U8 diretto VidEmbed: {m3u_url}")
         processed_url = m3u_url  # Use the M3U8 URL directly
-    # Trasforma /stream/ in /embed/ per Daddylive
-    elif '/stream/stream-' in m3u_url and any(domain in m3u_url for domain in ['thedaddy.dad', 'thedaddy.click', 'daddylive.sx']):
-        processed_url = m3u_url.replace('/stream/stream-', '/embed/stream-')
-        logger.info(f"URL {m3u_url} trasformato da /stream/ a /embed/: {processed_url}")
+    # Trasforma vari pattern in /embed/ per Daddylive
+    elif any(domain in m3u_url for domain in cdn_config['daddylive_domains']):
+        if '/stream/stream-' in m3u_url:
+            processed_url = m3u_url.replace('/stream/stream-', '/embed/stream-')
+            logger.info(f"URL {m3u_url} trasformato da /stream/ a /embed/: {processed_url}")
+        elif '/cast/stream-' in m3u_url:
+            processed_url = m3u_url.replace('/cast/stream-', '/embed/stream-')
+            logger.info(f"URL {m3u_url} trasformato da /cast/ a /embed/: {processed_url}")
+        elif '/watch/stream-' in m3u_url:
+            processed_url = m3u_url.replace('/watch/stream-', '/embed/stream-')
+            logger.info(f"URL {m3u_url} trasformato da /watch/ a /embed/: {processed_url}")
+        else:
+            processed_url = m3u_url
+            logger.info(f"URL {processed_url} DaddyLive processato senza trasformazione.")
     else:
         # Check for premium pattern transformation
         match_premium_m3u8 = re.search(r'/premium(\d+)/mono\.m3u8$', m3u_url)
@@ -683,10 +920,24 @@ def proxy_m3u():
             logger.info(f"URL {processed_url} processato per la risoluzione.")
 
     try:
-        if is_direct_m3u8:
-            # Direct M3U8 URL - just fetch it without resolving
-            logger.info(f"Direct M3U8 URL detected, fetching content directly: {processed_url}")
-            m3u_response = requests.get(processed_url, headers=headers, allow_redirects=True, timeout=(10, 20))
+        if is_direct_m3u8 or is_happy_ending_jwt:
+            # Direct M3U8 URL or happy-ending.site JWT URL - just fetch it without resolving
+            logger.info(f"Direct M3U8/JWT URL detected, fetching content directly: {processed_url}")
+            
+            # For happy-ending.site JWT URLs, use specific headers
+            if is_happy_ending_jwt:
+                jwt_headers = {
+                    'User-Agent': headers.get('User-Agent', ''),
+                    'Referer': 'https://kleanplay.shop/',
+                    'Origin': 'https://kleanplay.shop',
+                    'Accept': '*/*',
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache'
+                }
+                m3u_response = requests.get(processed_url, headers=jwt_headers, allow_redirects=True, timeout=(10, 20))
+            else:
+                m3u_response = requests.get(processed_url, headers=headers, allow_redirects=True, timeout=(10, 20))
+            
             m3u_response.raise_for_status()
             m3u_content = m3u_response.text
             final_url = m3u_response.url
@@ -1115,6 +1366,173 @@ def json_to_m3u(data, host_url):
                 )
     
     return m3u_content
+
+@app.route('/discover/cdns')
+def discover_cdns():
+    """Discovers and tests available CDN endpoints for a given channel"""
+    channel_id = request.args.get('channel_id', '1')
+    test_timeout = int(request.args.get('timeout', '5'))
+    
+    try:
+        cdn_config = get_all_player_cdns()
+        working_cdns = []
+        failed_cdns = []
+        
+        # Test newkso CDNs
+        for cdn in cdn_config['newkso_cdns']:
+            if 'top1.newkso.ru' in cdn:
+                test_url = f"https://{cdn}/top1/cdn/premium{channel_id}/mono.m3u8"
+            else:
+                server_key = cdn.split('.')[0]
+                if server_key.endswith('new'):
+                    server_key = server_key[:-3]
+                test_url = f"https://{cdn}/{server_key}/premium{channel_id}/mono.m3u8"
+            
+            try:
+                test_headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
+                    'Referer': 'https://jxoplay.xyz/premiumtv/',
+                    'Origin': 'https://jxoplay.xyz'
+                }
+                response = requests.head(test_url, headers=test_headers, timeout=test_timeout, verify=False)
+                if response.status_code in [200, 302, 206]:
+                    working_cdns.append({
+                        'cdn': cdn,
+                        'url': test_url,
+                        'status': response.status_code
+                    })
+                    logger.info(f"Working CDN found: {test_url}")
+                else:
+                    failed_cdns.append({
+                        'cdn': cdn,
+                        'url': test_url,
+                        'status': response.status_code
+                    })
+            except Exception as e:
+                failed_cdns.append({
+                    'cdn': cdn,
+                    'url': test_url,
+                    'error': str(e)
+                })
+        
+        result = {
+            'channel_id': channel_id,
+            'working_cdns': working_cdns,
+            'failed_cdns': failed_cdns,
+            'total_tested': len(cdn_config['newkso_cdns']),
+            'working_count': len(working_cdns),
+            'failed_count': len(failed_cdns)
+        }
+        
+        return Response(json.dumps(result, indent=2), content_type='application/json')
+        
+    except Exception as e:
+        logger.error(f"CDN discovery error: {str(e)}")
+        return f"CDN discovery error: {str(e)}", 500
+
+@app.route('/list/cdns')
+def list_cdns():
+    """Returns all known CDN configurations"""
+    try:
+        cdn_config = get_all_player_cdns()
+        return Response(json.dumps(cdn_config, indent=2), content_type='application/json')
+    except Exception as e:
+        return f"Error listing CDNs: {str(e)}", 500
+
+@app.route('/test/connectivity')
+def test_connectivity():
+    """Test basic connectivity to CDN servers"""
+    try:
+        cdn_tests = []
+        test_domains = [
+            'zekonew.newkso.ru',
+            'nfsnew.newkso.ru', 
+            'windnew.newkso.ru',
+            'ddy1new.newkso.ru',
+            'top1.newkso.ru'
+        ]
+        
+        for domain in test_domains:
+            try:
+                test_url = f"https://{domain}/"
+                response = requests.head(test_url, timeout=5, verify=False)
+                cdn_tests.append({
+                    'domain': domain,
+                    'status': response.status_code,
+                    'reachable': True
+                })
+            except Exception as e:
+                cdn_tests.append({
+                    'domain': domain,
+                    'error': str(e),
+                    'reachable': False
+                })
+        
+        return Response(json.dumps({'tests': cdn_tests}, indent=2), content_type='application/json')
+        
+    except Exception as e:
+        return f"Connectivity test error: {str(e)}", 500
+
+@app.route('/test/bypass')
+def test_bypass():
+    """Test IP bypass strategies for authentication"""
+    channel_id = request.args.get('channel_id', '141')
+    
+    try:
+        # Test different auth servers with various header strategies
+        auth_servers = [
+            'https://top2new.newkso.ru/auth.php',
+            'https://top1new.newkso.ru/auth.php', 
+            'https://windnew.newkso.ru/auth.php',
+            'https://nfsnew.newkso.ru/auth.php'
+        ]
+        
+        header_strategies = [
+            {
+                'name': 'mobile_safari',
+                'headers': {
+                    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.5',
+                    'Referer': 'https://jxoplay.xyz/premiumtv/'
+                }
+            },
+            {
+                'name': 'desktop_chrome',
+                'headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
+                    'Accept': 'application/json, text/plain, */*',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Referer': 'https://jxoplay.xyz/'
+                }
+            }
+        ]
+        
+        results = []
+        
+        for server in auth_servers:
+            for strategy in header_strategies:
+                test_url = f"{server}?channel_id=premium{channel_id}&ts=1754836000&rnd=test1234&sig=dummysig"
+                try:
+                    response = requests.head(test_url, headers=strategy['headers'], timeout=5, verify=False)
+                    results.append({
+                        'server': server,
+                        'strategy': strategy['name'],
+                        'status': response.status_code,
+                        'success': response.status_code not in [403, 404]
+                    })
+                except Exception as e:
+                    results.append({
+                        'server': server,
+                        'strategy': strategy['name'],
+                        'error': str(e),
+                        'success': False
+                    })
+        
+        return Response(json.dumps({'channel_id': channel_id, 'tests': results}, indent=2), content_type='application/json')
+        
+    except Exception as e:
+        return f"Bypass test error: {str(e)}", 500
 
 @app.route('/')
 def index():

@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:thedaddy.dad)",
+      "WebFetch(domain:daddylive.sx)",
+      "WebFetch(domain:daddylive.mp)",
+      "WebFetch(domain:thedaddy.click)",
+      "WebFetch(domain:dlhd.click)",
+      "Bash(docker build:*)",
+      "Bash(docker run:*)",
+      "Bash(curl:*)",
+      "Bash(docker stop:*)",
+      "Bash(docker rm:*)"
+    ],
+    "deny": []
+  }
+}
