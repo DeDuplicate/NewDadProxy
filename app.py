@@ -776,7 +776,7 @@ def proxy_m3u():
         
         # For VLC, ensure we return proper status and headers for full responses too
         response_headers = {
-            'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
+            'Content-Type': 'application/x-mpegURL',
             'Content-Length': str(len(content_bytes)),
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, OPTIONS',
@@ -972,44 +972,15 @@ def playlist_channels():
         
         content_bytes = modified_content.encode('utf-8')
 
-        # Handle Range requests for VLC compatibility
-        range_header = request.headers.get('Range')
-        if range_header and range_header.startswith('bytes='):
-            try:
-                range_spec = range_header[6:]  # Remove "bytes="
-                if '-' in range_spec:
-                    start_str, end_str = range_spec.split('-', 1)
-                    start = int(start_str) if start_str else 0
-                    end = int(end_str) if end_str else len(content_bytes) - 1
-                    
-                    if start >= len(content_bytes):
-                        return Response('Range Not Satisfiable', status=416)
-                    
-                    end = min(end, len(content_bytes) - 1)
-                    partial_content = content_bytes[start:end+1]
-                    
-                    response_headers = {
-                        'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
-                        'Content-Length': str(len(partial_content)),
-                        'Content-Range': f'bytes {start}-{end}/{len(content_bytes)}',
-                        'Accept-Ranges': 'bytes',
-                        'Access-Control-Allow-Origin': '*',
-                        'Access-Control-Allow-Methods': 'GET, OPTIONS',
-                        'Access-Control-Allow-Headers': 'Range, User-Agent, Content-Type',
-                    }
-                    
-                    logger.info(f"Serving partial content: bytes {start}-{end}/{len(content_bytes)}")
-                    return Response(partial_content, status=206, headers=response_headers)
-            except (ValueError, IndexError):
-                logger.info("Invalid range header, serving full content")
         
         # For VLC, ensure we return proper status and headers
         response_headers = {
-            'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
+            'Content-Type': 'application/x-mpegURL',
             'Content-Length': str(len(content_bytes)),
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, OPTIONS',
             'Access-Control-Allow-Headers': 'Range, User-Agent, Content-Type',
+            'Accept-Ranges': 'bytes',
         }
         return Response(content_bytes, status=200, headers=response_headers)
         
